@@ -4,4 +4,4 @@
 - [ ] Create synchronous read
   - [ ] Create blocking synchronous read
   - [ ] Create non-blocking synchronous read
-
+- [ ] Configure Travis CI
