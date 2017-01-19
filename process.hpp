@@ -25,21 +25,23 @@
 
 #endif
 
-///Platform independent class for creating processes
+namespace subprocess {
+
 class Process {
 public:
+  typedef Function std::function<void(const char* bytes, size_t n)>;
 #ifdef _WIN32
-  typedef unsigned long id_type; //Process id type
-  typedef void *fd_type; //File descriptor type
+  typedef unsigned long id_type; // Process id type
+  typedef void*         fd_type; // File descriptor type
 #ifdef UNICODE
-  typedef std::wstring string_type;
+  typedef std::wstring  string_type;
 #else
-  typedef std::string string_type;
+  typedef std::string   string_type;
 #endif
 #else
-  typedef pid_t id_type;
-  typedef int fd_type;
-  typedef std::string string_type;
+  typedef pid_t         id_type;
+  typedef int           fd_type;
+  typedef std::string   string_type;
 #endif
 private:
   class Data {
@@ -47,91 +49,82 @@ private:
     Data();
     id_type id;
 #ifdef _WIN32
-    void *handle;
+    void* handle;
 #endif
   };
+
 public:
   ///Note on Windows: it seems not possible to specify which pipes to redirect.
   ///Thus, at the moment, if read_stdout==nullptr, read_stderr==nullptr and open_stdin==false,
   ///the stdout, stderr and stdin are sent to the parent process instead.
-  Process(const string_type &command, const string_type &path=string_type(),
-          std::function<void(const char *bytes, size_t n)> read_stdout=nullptr,
-          std::function<void(const char *bytes, size_t n)> read_stderr=nullptr,
-          bool open_stdin=false,
-          size_t buffer_size=131072);
+  Process(const string_type& command,
+          const string_type& path        = string_type(),
+          Function           read_stdout = nullptr,
+          Function           read_stderr = nullptr,
+          bool               open_stdin  = false,
+          bool               blocking    = true,
+          size_t             buffer_size = 131072) :
+      closed(true), read_stdout(read_stdout), read_stderr(read_stderr), open_stdin(open_stdin), buffer_size(buffer_size), async(true), blocking(true) {
+      open(command, path);
+    }
 #ifndef _WIN32
-  /// Supported on Unix-like systems only.
+  /// Supported on Unix-like systems only
   Process(std::function<void()> function,
-          std::function<void(const char *bytes, size_t n)> read_stdout=nullptr,
-          std::function<void(const char *bytes, size_t n)> read_stderr=nullptr,
-          bool open_stdin=false,
-          size_t buffer_size=131072);
+          Function              read_stdout = nullptr,
+          Function              read_stderr = nullptr,
+          bool                  open_stdin  = false,
+          bool                  blocking    = true,
+          size_t                buffer_size = 131072);
 #endif
-  ~Process();
+
+  ~Process() { close_fds(); }
 
   ///Get the process id of the started process.
-  id_type get_id();
+  id_type get_id() { return data.id; }
+
   ///Wait until process is finished, and return exit status.
   int get_exit_status();
+
   ///Write to stdin.
   bool write(const char *bytes, size_t n);
+
   ///Write to stdin. Convenience function using write(const char *, size_t).
-  bool write(const std::string &data);
+  bool write(const std::string &data) { return write(data.c_str(), data.size()); }
+
   ///Close stdin. If the process takes parameters from stdin, use this to notify that all parameters have been sent.
   void close_stdin();
 
   ///Kill the process. force=true is only supported on Unix-like systems.
-  void kill(bool force=false);
+  void kill(bool force = false);
+
   ///Kill a given process id. Use kill(bool force) instead if possible. force=true is only supported on Unix-like systems.
   static void kill(id_type id, bool force=false);
 
 private:
-  Data data;
-  bool closed;
-  std::mutex close_mutex;
-  std::function<void(const char* bytes, size_t n)> read_stdout;
-  std::function<void(const char* bytes, size_t n)> read_stderr;
-  std::thread stdout_thread, stderr_thread;
-  bool open_stdin;
-  std::mutex stdin_mutex;
-  size_t buffer_size;
+  // TODO: Change order to avoid alignment issues
+  bool        closed;
+  Function    read_stdout;
+  Function    read_stderr;
+  bool        open_stdin;
+  size_t      buffer_size;
+  bool        async;
+  bool        blocking;
+  std::thread stdout_thread;
+  std::thread stderr_thread;
+  std::mutex  close_mutex;
+  std::mutex  stdin_mutex;
+  Data        data;
 
   std::unique_ptr<fd_type> stdout_fd, stderr_fd, stdin_fd;
 
   id_type open(const string_type &command, const string_type &path);
+
 #ifndef _WIN32
   id_type open(std::function<void()> function);
 #endif
   void async_read();
   void close_fds();
 };
-
-// -----------
-// process.cpp
-// -----------
-Process::Process(const string_type &command, const string_type &path,
-                 std::function<void(const char* bytes, size_t n)> read_stdout,
-                 std::function<void(const char* bytes, size_t n)> read_stderr,
-                 bool open_stdin, size_t buffer_size):
-    closed(true), read_stdout(read_stdout), read_stderr(read_stderr), open_stdin(open_stdin), buffer_size(buffer_size) {
-      open(command, path);
-      async_read();
-    }
-
-Process::~Process() {
-  close_fds();
-}
-
-Process::id_type Process::get_id() {
-  return data.id;
-}
-
-bool Process::write(const std::string &data) {
-  return write(data.c_str(), data.size());
-}
-// -----------
-// process.cpp
-// -----------
 
 #ifdef _WIN32
 // ----------------
@@ -145,9 +138,8 @@ namespace {
 class Handle {
 public:
   Handle() : handle(INVALID_HANDLE_VALUE) { }
-  ~Handle() {
-    close();
-  }
+  ~Handle() { close(); }
+
   void close() {
     if (handle != INVALID_HANDLE_VALUE)
       ::CloseHandle(handle);
@@ -410,15 +402,14 @@ void Process::kill(id_type id, bool force) {
 // process_unix.cpp
 // ----------------
 
-Process::Data::Data(): id(-1) {}
+Process::Data::Data() : id(-1) {}
 
-Process::Process(std::function<void()> function,
+Process::Process(std::function<void()> func,
                  std::function<void (const char *, size_t)> read_stdout,
                  std::function<void (const char *, size_t)> read_stderr,
                  bool open_stdin, size_t buffer_size) :
-    closed(true), read_stdout(read_stdout), read_stderr(read_stderr), open_stdin(open_stdin), buffer_size(buffer_size) {
-      open(function);
-      async_read();
+    closed(true), read_stdout(read_stdout), read_stderr(read_stderr), open_stdin(open_stdin), buffer_size(buffer_size), async(true), blocking(true) {
+      open(func);
     }
 
 Process::id_type Process::open(std::function<void()> function) {
@@ -607,6 +598,8 @@ void Process::kill(id_type id, bool force) {
 // ----------------
 
 #endif
+
+}
 
 
 #endif  // TINY_PROCESS_LIBRARY_HPP_
