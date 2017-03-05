@@ -165,10 +165,10 @@ private:
 // process_win.cpp
 // ----------------
 
-/*
 Process::Data::Data(): id(0), handle(NULL) {}
 
 namespace {
+
 // Simple HANDLE wrapper to close it automatically from the destructor.
 class Handle {
 public:
@@ -194,16 +194,17 @@ private:
 
 //Based on the discussion thread: https://www.reddit.com/r/cpp/comments/3vpjqg/a_new_platform_independent_process_library_for_c11/cxq1wsj
 std::mutex create_process_mutex;
+
 }
 
 //Based on the example at https://msdn.microsoft.com/en-us/library/windows/desktop/ms682499(v=vs.85).aspx.
-Process::id_type Process::open(const string_type &command, const string_type &path) {
-  if(flags & OPEN_STDIN)
-    stdin_fd=std::unique_ptr<fd_type>(new fd_type(NULL));
-  if(read_stdout)
-    stdout_fd=std::unique_ptr<fd_type>(new fd_type(NULL));
-  if(read_stderr)
-    stderr_fd=std::unique_ptr<fd_type>(new fd_type(NULL));
+Process::id_type Process::open(const string_type& exec_name) {
+  if (!closed)
+    return data.id;
+
+  if (flags & OPEN_STDIN ) stdin_fd  = std::unique_ptr<fd_type>{ new fd_type(NULL) };
+  if (flags & OPEN_STDOUT) stdout_fd = std::unique_ptr<fd_type>{ new fd_type(NULL) };
+  if (flags & OPEN_STDERR) stderr_fd = std::unique_ptr<fd_type>{ new fd_type(NULL) };
 
   Handle stdin_rd_p;
   Handle stdin_wr_p;
@@ -219,18 +220,20 @@ Process::id_type Process::open(const string_type &command, const string_type &pa
   security_attributes.lpSecurityDescriptor = nullptr;
 
   std::lock_guard<std::mutex> lock(create_process_mutex);
-  if(stdin_fd) {
+  if (stdin_fd) {
     if (!CreatePipe(&stdin_rd_p, &stdin_wr_p, &security_attributes, 0) ||
         !SetHandleInformation(stdin_wr_p, HANDLE_FLAG_INHERIT, 0))
       return 0;
   }
-  if(stdout_fd) {
+
+  if (stdout_fd) {
     if (!CreatePipe(&stdout_rd_p, &stdout_wr_p, &security_attributes, 0) ||
         !SetHandleInformation(stdout_rd_p, HANDLE_FLAG_INHERIT, 0)) {
       return 0;
     }
   }
-  if(stderr_fd) {
+
+  if (stderr_fd) {
     if (!CreatePipe(&stderr_rd_p, &stderr_wr_p, &security_attributes, 0) ||
         !SetHandleInformation(stderr_rd_p, HANDLE_FLAG_INHERIT, 0)) {
       return 0;
@@ -250,18 +253,21 @@ Process::id_type Process::open(const string_type &command, const string_type &pa
   if(stdin_fd || stdout_fd || stderr_fd)
     startup_info.dwFlags |= STARTF_USESTDHANDLES;
 
-  string_type process_command=command;
+  string_type process_command = exec_name;
+
 #ifdef MSYS_PROCESS_USE_SH
   size_t pos=0;
-  while((pos=process_command.find('\\', pos))!=string_type::npos) {
+  while ((pos=process_command.find('\\', pos)) != string_type::npos) {
     process_command.replace(pos, 1, "\\\\\\\\");
-    pos+=4;
+    pos += 4;
   }
+
   pos=0;
-  while((pos=process_command.find('\"', pos))!=string_type::npos) {
+  while ((pos=process_command.find('\"', pos)) != string_type::npos) {
     process_command.replace(pos, 1, "\\\"");
-    pos+=2;
+    pos += 2;
   }
+
   process_command.insert(0, "sh -c \"");
   process_command+="\"";
 #endif
@@ -274,29 +280,59 @@ Process::id_type Process::open(const string_type &command, const string_type &pa
     TRUE,
     0,
     nullptr,
-    path.empty() ? nullptr : path.c_str(),
+    nullptr,
     &startup_info,
     &process_info
   );
 
   if (!bSuccess) {
-    closeHandle(process_info.hProcess);
+    CloseHandle(process_info.hProcess);
     CloseHandle(process_info.hThread);
     return 0;
   } else {
     CloseHandle(process_info.hThread);
   }
 
-  if(stdin_fd ) *stdin_fd=stdin_wr_p  .detach();
-  if(stdout_fd) *stdout_fd=stdout_rd_p.detach();
-  if(stderr_fd) *stderr_fd=stderr_rd_p.detach();
+  if (stdin_fd ) *stdin_fd  = stdin_wr_p .detach();
+  if (stdout_fd) *stdout_fd = stdout_rd_p.detach();
+  if (stderr_fd) *stderr_fd = stderr_rd_p.detach();
 
-  closed = false;
-  data.id = process_info.dwProcessId;
+  closed      = false;
+  data.id     = process_info.dwProcessId;
   data.handle = process_info.hProcess;
+
   return process_info.dwProcessId;
 }
 
+bool Process::read_stdout_line(std::string& str) {
+  if (data.id <= 0 or closed or !stdout_fd)
+    return false;
+
+  str.clear();
+
+  DWORD n;
+  char buffer;
+  while (ReadFile(*stdout_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr) and n != 0 and buffer != '\n')
+    str += buffer;
+
+  return !str.empty();
+}
+
+bool Process::read_stderr_line(std::string& str) {
+  if (data.id <= 0 or closed or !stderr_fd)
+    return false;
+
+  str.clear();
+
+  DWORD n;
+  char buffer;
+  while (ReadFile(*stderr_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr) and n != 0 and buffer != '\n')
+    str += buffer;
+
+  return !str.empty();
+}
+
+/*
 void Process::async_read() {
   if(data.id==0)
     return;
@@ -327,17 +363,22 @@ void Process::async_read() {
                               });
   }
 }
+*/
 
 int Process::get_exit_status() {
-  if(data.id==0)
+  if(data.id == 0)
     return -1;
 
   DWORD exit_status;
   WaitForSingleObject(data.handle, INFINITE);
   if(!GetExitCodeProcess(data.handle, &exit_status))
     exit_status=-1;
+
   {
+    /*
+    // TODO: Thread-safe
     std::lock_guard<std::mutex> lock(close_mutex);
+    */
     CloseHandle(data.handle);
     closed=true;
   }
@@ -347,79 +388,93 @@ int Process::get_exit_status() {
 }
 
 void Process::close_fds() {
+  /*
+  // TODO: Async read
   if(stdout_thread.joinable())
     stdout_thread.join();
   if(stderr_thread.joinable())
     stderr_thread.join();
+  */
 
-  if(stdin_fd)
+  if (stdin_fd)
     close_stdin();
-  if(stdout_fd) {
-    if(*stdout_fd != NULL) CloseHandle(*stdout_fd);
+
+  if (stdout_fd) {
+    if (*stdout_fd != NULL) CloseHandle(*stdout_fd);
     stdout_fd.reset();
   }
-  if(stderr_fd) {
-    if(*stderr_fd != NULL) CloseHandle(*stderr_fd);
+
+  if (stderr_fd) {
+    if (*stderr_fd != NULL) CloseHandle(*stderr_fd);
     stderr_fd.reset();
   }
 }
 
 bool Process::write(const char *bytes, size_t n) {
-  if(!open_stdin)
-    throw std::invalid_argument("Can't write to an unopened stdin pipe. Please set open_stdin=true when constructing the process.");
+  if (closed or !stdin_fd)
+    return false;
 
+  /*
+  // TODO: Thread-safe
   std::lock_guard<std::mutex> lock(stdin_mutex);
-  if(stdin_fd) {
-    DWORD written;
-    BOOL bSuccess = WriteFile(*stdin_fd, bytes, static_cast<DWORD>(n), &written, nullptr);
-    if(!bSuccess || written==0) {
-      return false;
-    }
-    else {
-      return true;
-    }
-  }
-  return false;
+  */
+
+  DWORD written;
+  BOOL bSuccess = WriteFile(*stdin_fd, bytes, static_cast<DWORD>(n), &written, nullptr);
+
+  if(!bSuccess || written==0) return false;
+  else return true;
 }
 
 void Process::close_stdin() {
+  if (closed or !stdin_fd or data.id <= 0)
+    return;
+
+  /*
+  // TODO: Thread-safe
   std::lock_guard<std::mutex> lock(stdin_mutex);
-  if(stdin_fd) {
-    if(*stdin_fd!=NULL) CloseHandle(*stdin_fd);
-    stdin_fd.reset();
-  }
+  */
+
+  CloseHandle(*stdin_fd);
+  stdin_fd.reset();
 }
 
 //Based on http://stackoverflow.com/a/1173396
 void Process::kill(bool force) {
+  if (!closed or data.id <= 0)
+    return;
+
+  /*
+  // TODO: Thread-safe
   std::lock_guard<std::mutex> lock(close_mutex);
-  if(data.id>0 && !closed) {
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if(snapshot) {
-      PROCESSENTRY32 process;
-      ZeroMemory(&process, sizeof(process));
-      process.dwSize = sizeof(process);
-      if(Process32First(snapshot, &process)) {
-        do {
-          if(process.th32ParentProcessID==data.id) {
-            HANDLE process_handle = OpenProcess(PROCESS_TERMINATE, FALSE, process.th32ProcessID);
-            if(process_handle) {
-              TerminateProcess(process_handle, 2);
-              CloseHandle(process_handle);
-            }
+  */
+
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+  if (snapshot) {
+    PROCESSENTRY32 process;
+    ZeroMemory(&process, sizeof(process));
+    process.dwSize = sizeof(process);
+
+    if (Process32First(snapshot, &process)) {
+      do {
+        if (process.th32ParentProcessID == data.id) {
+          HANDLE process_handle = OpenProcess(PROCESS_TERMINATE, FALSE, process.th32ProcessID);
+          if (process_handle) {
+            TerminateProcess(process_handle, 2);
+            CloseHandle(process_handle);
           }
-        } while (Process32Next(snapshot, &process));
-      }
-      CloseHandle(snapshot);
+        }
+      } while (Process32Next(snapshot, &process));
     }
-    TerminateProcess(data.handle, 2);
+    CloseHandle(snapshot);
   }
+  TerminateProcess(data.handle, 2);
 }
 
 // ----------------
 // process_win.cpp
 // ----------------
-*/
 
 #else
 
@@ -515,7 +570,7 @@ bool Process::read_stdout_line(std::string& str) {
   str.clear();
 
   char buffer;
-  while ((::read(*stdout_fd, &buffer, sizeof(buffer))) > 0 and buffer != '\n')
+  while (::read(*stdout_fd, &buffer, sizeof(buffer)) > 0 and buffer != '\n')
     str += buffer;
 
   return !str.empty();
@@ -528,7 +583,7 @@ bool Process::read_stderr_line(std::string& str) {
   str.clear();
 
   char buffer;
-  while ((::read(*stderr_fd, &buffer, sizeof(buffer))) > 0 and buffer != '\n')
+  while (::read(*stderr_fd, &buffer, sizeof(buffer)) > 0 and buffer != '\n')
     str += buffer;
 
   return !str.empty();
@@ -618,7 +673,7 @@ bool Process::write(const char *bytes, size_t n) {
   if (closed or !stdin_fd)
     return false;
 
-  if (stdin_fd and ::write(*stdin_fd, bytes, n) >= 0)
+  if (::write(*stdin_fd, bytes, n) >= 0)
     return true;
 
   return false;
