@@ -9,7 +9,7 @@
 #include <functional>
 #include <vector>
 #include <mutex>
-#include <thread>
+//#include <thread>
 #include <memory>
 
 #ifdef _WIN32
@@ -72,29 +72,37 @@ private:
   };
 
 public:
+  Process() {}
+
   // Note on Windows: it seems not possible to specify which pipes to redirect.
   // Thus, at the moment, if read_stdout==nullptr, read_stderr==nullptr and open_stdin==false,
   // the stdout, stderr and stdin are sent to the parent process instead.
-  Process(const string_type& exec_name,
-          unsigned           flags       = OPEN_ALL,
-          size_t             buffer_size = 131072) :
-      closed(true), flags(flags), buffer_size(buffer_size)
+  Process(const string_type& exec_name, unsigned flags = OPEN_ALL) :
+      closed(true), flags(flags)
   {
-    open(exec_name);
+    open_internal(exec_name);
   }
 
 #ifndef _WIN32
   // Supported on Unix-like systems only
-  Process(std::function<void()> func,
-          unsigned              flags       = OPEN_ALL,
-          size_t                buffer_size = 131072) :
-    closed(true), flags(flags), buffer_size(buffer_size)
+  Process(std::function<void()> func, unsigned flags = OPEN_ALL) :
+    closed(true), flags(flags)
   {
-    open(func);
+    open_internal(func);
   }
 #endif
 
   ~Process() { close_fds(); }
+
+  void open(const string_type& exec_name, unsigned flags = OPEN_ALL)
+  {
+    if (!closed)
+      kill();
+
+    closed = true;
+    this->flags = flags;
+    open_internal(exec_name);
+  }
 
   // Get the process id of the started process.
   id_type get_id() { return data.id; }
@@ -128,7 +136,6 @@ private:
   // TODO: Change order to avoid alignment issues
   bool        closed;
   unsigned    flags;
-  size_t      buffer_size;
 
   /*
   // TODO: Asynchronous reading
@@ -150,10 +157,10 @@ private:
   std::mutex  is_reading_stderr_mutex;
   */
 
-  id_type open(const string_type& exec_name);
+  id_type open_internal(const string_type& exec_name);
 
 #ifndef _WIN32
-  id_type open(std::function<void()> func);
+  id_type open_internal(std::function<void()> func);
 #endif
 
   // Return true if read is successful, otherwise return false
@@ -198,7 +205,7 @@ std::mutex create_process_mutex;
 }
 
 //Based on the example at https://msdn.microsoft.com/en-us/library/windows/desktop/ms682499(v=vs.85).aspx.
-Process::id_type Process::open(const string_type& exec_name) {
+Process::id_type Process::open_internal(const string_type& exec_name) {
   if (!closed)
     return data.id;
 
@@ -311,10 +318,16 @@ bool Process::read_stdout_line(std::string& str) {
 
   DWORD n;
   char buffer;
-  while (PeekNamedPipe(*stdout_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr, nullptr) and n) {
-    ReadFile(*stdout_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr);
-    if (buffer == '\n') break;
-    str += buffer;
+
+  if (flags & NONBLOCKING_STDOUT) {
+    while (PeekNamedPipe(*stdout_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr, nullptr) and n) {
+      ReadFile(*stdout_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr);
+      if (buffer == '\n') break;
+      str += buffer;
+    }
+  } else {
+    while (ReadFile(*stdout_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr) and n and buffer != '\n')
+      str += buffer;
   }
 
   return !str.empty();
@@ -328,10 +341,15 @@ bool Process::read_stderr_line(std::string& str) {
 
   DWORD n;
   char buffer;
-  while (PeekNamedPipe(*stderr_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr, nullptr) and n) {
-    ReadFile(*stderr_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr);
-    if (buffer == '\n') break;
-    str += buffer;
+  if (flags & NONBLOCKING_STDOUT) {
+    while (PeekNamedPipe(*stderr_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr, nullptr) and n) {
+      ReadFile(*stderr_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr);
+      if (buffer == '\n') break;
+      str += buffer;
+    }
+  } else {
+    while (ReadFile(*stderr_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr) and n and buffer != '\n')
+      str += buffer;
   }
 
   return !str.empty();
@@ -489,7 +507,7 @@ void Process::kill(bool force) {
 
 Process::Data::Data() : id(-1) {}
 
-Process::id_type Process::open(std::function<void()> func) {
+Process::id_type Process::open_internal(std::function<void()> func) {
   if (!closed)
     return data.id;
 
@@ -564,8 +582,8 @@ Process::id_type Process::open(std::function<void()> func) {
   return pid;
 }
 
-Process::id_type Process::open(const std::string& command) {
-  return open([&command] { execl("/bin/sh", "sh", "-c", command.c_str(), nullptr); });
+Process::id_type Process::open_internal(const std::string& command) {
+  return open_internal([&command] { execl("/bin/sh", "sh", "-c", command.c_str(), nullptr); });
 }
 
 bool Process::read_stdout_line(std::string& str) {
@@ -601,6 +619,7 @@ void Process::read_stdout(std::function<void(const char*, size_t)> callback) {
     return;
 
   stdout_thread = std::thread([this, &callback] {
+                                size_t buffer_size = 1024;
                                 auto buffer = std::unique_ptr<char[]>( new char[buffer_size] );
                                 ssize_t n;
                                 // FIXME: Non-blocking pipes
@@ -615,6 +634,7 @@ void Process::read_stderr(std::function<void(const char*, size_t)> callback) {
     return;
 
   stderr_thread = std::thread([this, &callback] {
+                                size_t buffer_size = 1024;
                                 auto buffer = std::unique_ptr<char[]>( new char[buffer_size] );
                                 ssize_t n;
                                 // FIXME: Non-blocking pipes
@@ -656,7 +676,7 @@ void Process::close_fds() {
     stdout_thread.join();
   if (stderr_thread.joinable())
     stderr_thread.join();
-    */
+  */
 
   if (stdin_fd)
     close_stdin();
@@ -678,10 +698,7 @@ bool Process::write(const char *bytes, size_t n) {
   if (closed or !stdin_fd)
     return false;
 
-  if (::write(*stdin_fd, bytes, n) >= 0)
-    return true;
-
-  return false;
+  return (::write(*stdin_fd, bytes, n) >= 0);
 }
 
 void Process::close_stdin() {
