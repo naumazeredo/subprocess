@@ -341,7 +341,7 @@ bool Process::read_stderr_line(std::string& str) {
 
   DWORD n;
   char buffer;
-  if (flags & NONBLOCKING_STDOUT) {
+  if (flags & NONBLOCKING_STDERR) {
     while (PeekNamedPipe(*stderr_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr, nullptr) and n) {
       ReadFile(*stderr_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr);
       if (buffer == '\n') break;
