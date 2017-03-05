@@ -226,18 +226,17 @@ Process::id_type Process::open(const string_type& exec_name) {
       return 0;
   }
 
+
   if (stdout_fd) {
     if (!CreatePipe(&stdout_rd_p, &stdout_wr_p, &security_attributes, 0) ||
-        !SetHandleInformation(stdout_rd_p, HANDLE_FLAG_INHERIT, 0)) {
+        !SetHandleInformation(stdout_rd_p, HANDLE_FLAG_INHERIT, 0))
       return 0;
-    }
   }
 
   if (stderr_fd) {
     if (!CreatePipe(&stderr_rd_p, &stderr_wr_p, &security_attributes, 0) ||
-        !SetHandleInformation(stderr_rd_p, HANDLE_FLAG_INHERIT, 0)) {
+        !SetHandleInformation(stderr_rd_p, HANDLE_FLAG_INHERIT, 0))
       return 0;
-    }
   }
 
   PROCESS_INFORMATION process_info;
@@ -312,8 +311,11 @@ bool Process::read_stdout_line(std::string& str) {
 
   DWORD n;
   char buffer;
-  while (ReadFile(*stdout_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr) and n != 0 and buffer != '\n')
+  while (PeekNamedPipe(*stdout_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr, nullptr) and n) {
+    ReadFile(*stdout_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr);
+    if (buffer == '\n') break;
     str += buffer;
+  }
 
   return !str.empty();
 }
@@ -326,8 +328,11 @@ bool Process::read_stderr_line(std::string& str) {
 
   DWORD n;
   char buffer;
-  while (ReadFile(*stderr_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr) and n != 0 and buffer != '\n')
+  while (PeekNamedPipe(*stderr_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr, nullptr) and n) {
+    ReadFile(*stderr_fd, static_cast<CHAR*>(&buffer), 1, &n, nullptr);
+    if (buffer == '\n') break;
     str += buffer;
+  }
 
   return !str.empty();
 }
