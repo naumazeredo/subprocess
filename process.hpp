@@ -21,23 +21,26 @@
 
 #else
 
-#include <sys/wait.h>
 #include <cstdlib>
+#include <stdexcept>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <signal.h>
-#include <stdexcept>
+#include <fcntl.h>
 
 #endif
 
 namespace subprocess {
 
 enum Flags {
-  DEFAULT            = 0x00,
+  CLOSED             = 0x00,
   OPEN_STDIN         = 0x01,
   OPEN_STDOUT        = 0x02,
-  OPEN_STDERR        = 0x04
-  //NONBLOCKING_STDOUT = 0x10, // FUTURE
-  //NONBLOCKING_STDERR = 0x20  // FUTURE
+  OPEN_STDERR        = 0x04,
+  NONBLOCKING_STDOUT = 0x10,
+  NONBLOCKING_STDERR = 0x20,
+
+  OPEN_ALL           = OPEN_STDIN | OPEN_STDOUT | OPEN_STDERR
 };
 
 class Process {
@@ -73,7 +76,7 @@ public:
   // Thus, at the moment, if read_stdout==nullptr, read_stderr==nullptr and open_stdin==false,
   // the stdout, stderr and stdin are sent to the parent process instead.
   Process(const string_type& exec_name,
-          unsigned           flags       = DEFAULT,
+          unsigned           flags       = OPEN_ALL,
           size_t             buffer_size = 131072) :
       closed(true), flags(flags), buffer_size(buffer_size)
   {
@@ -83,7 +86,7 @@ public:
 #ifndef _WIN32
   // Supported on Unix-like systems only
   Process(std::function<void()> func,
-          unsigned              flags       = DEFAULT,
+          unsigned              flags       = OPEN_ALL,
           size_t                buffer_size = 131072) :
     closed(true), flags(flags), buffer_size(buffer_size)
   {
@@ -111,28 +114,41 @@ public:
   // Kill the process. force=true is only supported on Unix-like systems.
   void kill(bool force = false);
 
-  bool read_line(std::string&);
+  // Synchronous reading
+  bool read_stdout_line(std::string&);
+  bool read_stderr_line(std::string&);
+
+  /*
+  // TODO: Asynchronous reading
   void read_stdout(std::function<void(const char*, size_t)>);
   void read_stderr(std::function<void(const char*, size_t)>);
+  */
 
 private:
   // TODO: Change order to avoid alignment issues
   bool        closed;
   unsigned    flags;
   size_t      buffer_size;
+
+  /*
+  // TODO: Asynchronous reading
   std::thread stdout_thread;
   std::thread stderr_thread;
+  */
+
+  Data        data;
+
+  std::unique_ptr<fd_type> stdout_fd, stderr_fd, stdin_fd;
+
+  /*
+  // TODO: Thread-safe
   std::mutex  close_mutex;
   std::mutex  stdin_mutex;
-  /*
   bool        is_reading_stdout;
   bool        is_reading_stderr;
   std::mutex  is_reading_stdout_mutex;
   std::mutex  is_reading_stderr_mutex;
   */
-  Data        data;
-
-  std::unique_ptr<fd_type> stdout_fd, stderr_fd, stdin_fd;
 
   id_type open(const string_type& exec_name);
 
@@ -415,7 +431,7 @@ Process::Data::Data() : id(-1) {}
 
 Process::id_type Process::open(std::function<void()> func) {
   if (!closed)
-    return -1;
+    return data.id;
 
   if(flags & OPEN_STDIN ) stdin_fd  = std::unique_ptr<fd_type>(new fd_type);
   if(flags & OPEN_STDOUT) stdout_fd = std::unique_ptr<fd_type>(new fd_type);
@@ -470,13 +486,17 @@ Process::id_type Process::open(std::function<void()> func) {
     _exit(EXIT_FAILURE);
   }
 
-  if(stdin_fd ) close(stdin_p [0]);
-  if(stdout_fd) close(stdout_p[1]);
-  if(stderr_fd) close(stderr_p[1]);
+  if (stdin_fd ) close(stdin_p [0]);
+  if (stdout_fd) close(stdout_p[1]);
+  if (stderr_fd) close(stderr_p[1]);
 
-  if(stdin_fd ) *stdin_fd  = stdin_p [1];
-  if(stdout_fd) *stdout_fd = stdout_p[0];
-  if(stderr_fd) *stderr_fd = stderr_p[0];
+  if (stdin_fd ) *stdin_fd  = stdin_p [1];
+  if (stdout_fd) *stdout_fd = stdout_p[0];
+  if (stderr_fd) *stderr_fd = stderr_p[0];
+
+  // Non-blocking pipes
+  if (stdout_fd and flags & NONBLOCKING_STDOUT) fcntl(stdout_p[0], F_SETFL, fcntl(stdout_p[0], F_GETFL, 0) | O_NONBLOCK);
+  if (stderr_fd and flags & NONBLOCKING_STDERR) fcntl(stderr_p[0], F_SETFL, fcntl(stderr_p[0], F_GETFL, 0) | O_NONBLOCK);
 
   closed = false;
   data.id = pid;
@@ -488,19 +508,34 @@ Process::id_type Process::open(const std::string& command) {
   return open([&command] { execl("/bin/sh", "sh", "-c", command.c_str(), nullptr); });
 }
 
-bool Process::read_line(std::string& str) {
+bool Process::read_stdout_line(std::string& str) {
   if (data.id <= 0 or closed or !stdout_fd)
     return false;
 
   str.clear();
 
   char buffer;
-  while ((read(*stdout_fd, &buffer, sizeof(buffer))) > 0 and buffer != '\n')
+  while ((::read(*stdout_fd, &buffer, sizeof(buffer))) > 0 and buffer != '\n')
     str += buffer;
 
-  return true;
+  return !str.empty();
 }
 
+bool Process::read_stderr_line(std::string& str) {
+  if (data.id <= 0 or closed or !stderr_fd)
+    return false;
+
+  str.clear();
+
+  char buffer;
+  while ((::read(*stderr_fd, &buffer, sizeof(buffer))) > 0 and buffer != '\n')
+    str += buffer;
+
+  return !str.empty();
+}
+
+/*
+// TODO: Async read
 void Process::read_stdout(std::function<void(const char*, size_t)> callback) {
   if(data.id <= 0 or closed or !stdout_fd) // FIXME: Also verify if is already reading
     return;
@@ -508,6 +543,7 @@ void Process::read_stdout(std::function<void(const char*, size_t)> callback) {
   stdout_thread = std::thread([this, &callback] {
                                 auto buffer = std::unique_ptr<char[]>( new char[buffer_size] );
                                 ssize_t n;
+                                // FIXME: Non-blocking pipes
                                 while ((n = read(*stdout_fd, buffer.get(), buffer_size)) > 0)
                                   callback(buffer.get(), static_cast<size_t>(n));
                               }
@@ -521,11 +557,13 @@ void Process::read_stderr(std::function<void(const char*, size_t)> callback) {
   stderr_thread = std::thread([this, &callback] {
                                 auto buffer = std::unique_ptr<char[]>( new char[buffer_size] );
                                 ssize_t n;
+                                // FIXME: Non-blocking pipes
                                 while ((n = read(*stderr_fd, buffer.get(), buffer_size)) > 0)
                                   callback(buffer.get(), static_cast<size_t>(n));
                               }
                              );
 }
+*/
 
 int Process::get_exit_status() {
   if (data.id <= 0 or closed)
@@ -534,10 +572,15 @@ int Process::get_exit_status() {
   int exit_status;
   waitpid(data.id, &exit_status, 0);
 
+  /*
+  // TODO: Thread-safe
   {
     std::lock_guard<std::mutex> lock(close_mutex);
+    */
     closed=true;
+    /*
   }
+  */
   close_fds();
 
   if(exit_status>=256)
@@ -547,10 +590,13 @@ int Process::get_exit_status() {
 }
 
 void Process::close_fds() {
+  /*
+  // TODO: Async read
   if (stdout_thread.joinable())
     stdout_thread.join();
   if (stderr_thread.joinable())
     stderr_thread.join();
+    */
 
   if (stdin_fd)
     close_stdin();
