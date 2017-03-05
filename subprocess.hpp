@@ -110,6 +110,9 @@ public:
   // Wait until process is finished, and return exit status.
   int get_exit_status();
 
+  // Check is process is active
+  bool is_active();
+
   // Write to stdin.
   bool write(const char *bytes, size_t n);
 
@@ -410,6 +413,16 @@ int Process::get_exit_status() {
   return static_cast<int>(exit_status);
 }
 
+bool Process::is_active() {
+  if (data.id == 0 or closed)
+    return false;
+
+  DWORD status;
+  GetExitCodeProcess(data.handle, &status);
+
+  return status == STILL_ACTIVE;
+}
+
 void Process::close_fds() {
   /*
   // TODO: Async read
@@ -652,21 +665,27 @@ int Process::get_exit_status() {
   int exit_status;
   waitpid(data.id, &exit_status, 0);
 
-  /*
-  // TODO: Thread-safe
   {
+    /*
+    // TODO: Thread-safe
     std::lock_guard<std::mutex> lock(close_mutex);
     */
     closed=true;
-    /*
   }
-  */
   close_fds();
 
   if(exit_status>=256)
     exit_status=exit_status>>8;
 
   return exit_status;
+}
+
+bool Process::is_active() {
+  if (data.id <= 0 or closed)
+    return false;
+
+  int status = 0;
+  return (waitpid(data.id, &status, WNOHANG) == 0);
 }
 
 void Process::close_fds() {
