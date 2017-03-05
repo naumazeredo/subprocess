@@ -1,5 +1,6 @@
-# tiny-process-library
+# Subprocess cross-platform library
 A small platform independent library making it simple to create and stop new processes in C++, as well as writing to stdin and reading from stdout and stderr of a new process.
+Based on [tiny-process-library](https://github.com/eidheim/tiny-process-library)
 
 ### Features
 * Header-only project
