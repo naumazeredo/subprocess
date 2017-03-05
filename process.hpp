@@ -1,6 +1,10 @@
 #ifndef TINY_PROCESS_LIBRARY_HPP_
 #define TINY_PROCESS_LIBRARY_HPP_
 
+#ifdef __CYGWIN__
+#define _WIN32
+#endif
+
 #include <string>
 #include <functional>
 #include <vector>
@@ -27,9 +31,19 @@
 
 namespace subprocess {
 
+enum Flags {
+  DEFAULT            = 0x00,
+  OPEN_STDIN         = 0x01,
+  OPEN_STDOUT        = 0x02,
+  OPEN_STDERR        = 0x04
+  //NONBLOCKING_STDOUT = 0x10, // FUTURE
+  //NONBLOCKING_STDERR = 0x20  // FUTURE
+};
+
 class Process {
+
 public:
-  typedef Function std::function<void(const char* bytes, size_t n)>;
+
 #ifdef _WIN32
   typedef unsigned long id_type; // Process id type
   typedef void*         fd_type; // File descriptor type
@@ -43,6 +57,7 @@ public:
   typedef int           fd_type;
   typedef std::string   string_type;
 #endif
+
 private:
   class Data {
   public:
@@ -54,75 +69,78 @@ private:
   };
 
 public:
-  ///Note on Windows: it seems not possible to specify which pipes to redirect.
-  ///Thus, at the moment, if read_stdout==nullptr, read_stderr==nullptr and open_stdin==false,
-  ///the stdout, stderr and stdin are sent to the parent process instead.
-  Process(const string_type& command,
-          const string_type& path        = string_type(),
-          Function           read_stdout = nullptr,
-          Function           read_stderr = nullptr,
-          bool               open_stdin  = false,
-          bool               blocking    = true,
+  // Note on Windows: it seems not possible to specify which pipes to redirect.
+  // Thus, at the moment, if read_stdout==nullptr, read_stderr==nullptr and open_stdin==false,
+  // the stdout, stderr and stdin are sent to the parent process instead.
+  Process(const string_type& exec_name,
+          unsigned           flags       = DEFAULT,
           size_t             buffer_size = 131072) :
-      closed(true), read_stdout(read_stdout), read_stderr(read_stderr), open_stdin(open_stdin), buffer_size(buffer_size), async(true), blocking(true) {
-      open(command, path);
-    }
+      closed(true), flags(flags), buffer_size(buffer_size)
+  {
+    open(exec_name);
+  }
+
 #ifndef _WIN32
-  /// Supported on Unix-like systems only
-  Process(std::function<void()> function,
-          Function              read_stdout = nullptr,
-          Function              read_stderr = nullptr,
-          bool                  open_stdin  = false,
-          bool                  blocking    = true,
-          size_t                buffer_size = 131072);
+  // Supported on Unix-like systems only
+  Process(std::function<void()> func,
+          unsigned              flags       = DEFAULT,
+          size_t                buffer_size = 131072) :
+    closed(true), flags(flags), buffer_size(buffer_size)
+  {
+    open(func);
+  }
 #endif
 
   ~Process() { close_fds(); }
 
-  ///Get the process id of the started process.
+  // Get the process id of the started process.
   id_type get_id() { return data.id; }
 
-  ///Wait until process is finished, and return exit status.
+  // Wait until process is finished, and return exit status.
   int get_exit_status();
 
-  ///Write to stdin.
+  // Write to stdin.
   bool write(const char *bytes, size_t n);
 
-  ///Write to stdin. Convenience function using write(const char *, size_t).
+  // Write to stdin. Convenience function using write(const char *, size_t).
   bool write(const std::string &data) { return write(data.c_str(), data.size()); }
 
-  ///Close stdin. If the process takes parameters from stdin, use this to notify that all parameters have been sent.
+  // Close stdin. If the process takes parameters from stdin, use this to notify that all parameters have been sent.
   void close_stdin();
 
-  ///Kill the process. force=true is only supported on Unix-like systems.
+  // Kill the process. force=true is only supported on Unix-like systems.
   void kill(bool force = false);
 
-  ///Kill a given process id. Use kill(bool force) instead if possible. force=true is only supported on Unix-like systems.
-  static void kill(id_type id, bool force=false);
+  bool read_line(std::string&);
+  void read_stdout(std::function<void(const char*, size_t)>);
+  void read_stderr(std::function<void(const char*, size_t)>);
 
 private:
   // TODO: Change order to avoid alignment issues
   bool        closed;
-  Function    read_stdout;
-  Function    read_stderr;
-  bool        open_stdin;
+  unsigned    flags;
   size_t      buffer_size;
-  bool        async;
-  bool        blocking;
   std::thread stdout_thread;
   std::thread stderr_thread;
   std::mutex  close_mutex;
   std::mutex  stdin_mutex;
+  /*
+  bool        is_reading_stdout;
+  bool        is_reading_stderr;
+  std::mutex  is_reading_stdout_mutex;
+  std::mutex  is_reading_stderr_mutex;
+  */
   Data        data;
 
   std::unique_ptr<fd_type> stdout_fd, stderr_fd, stdin_fd;
 
-  id_type open(const string_type &command, const string_type &path);
+  id_type open(const string_type& exec_name);
 
 #ifndef _WIN32
-  id_type open(std::function<void()> function);
+  id_type open(std::function<void()> func);
 #endif
-  void async_read();
+
+  // Return true if read is successful, otherwise return false
   void close_fds();
 };
 
@@ -131,6 +149,7 @@ private:
 // process_win.cpp
 // ----------------
 
+/*
 Process::Data::Data(): id(0), handle(NULL) {}
 
 namespace {
@@ -144,11 +163,13 @@ public:
     if (handle != INVALID_HANDLE_VALUE)
       ::CloseHandle(handle);
   }
+
   HANDLE detach() {
     HANDLE old_handle = handle;
     handle = INVALID_HANDLE_VALUE;
     return old_handle;
   }
+
   operator HANDLE() const { return handle; }
   HANDLE* operator&() { return &handle; }
 private:
@@ -161,7 +182,7 @@ std::mutex create_process_mutex;
 
 //Based on the example at https://msdn.microsoft.com/en-us/library/windows/desktop/ms682499(v=vs.85).aspx.
 Process::id_type Process::open(const string_type &command, const string_type &path) {
-  if(open_stdin)
+  if(flags & OPEN_STDIN)
     stdin_fd=std::unique_ptr<fd_type>(new fd_type(NULL));
   if(read_stdout)
     stdout_fd=std::unique_ptr<fd_type>(new fd_type(NULL));
@@ -229,36 +250,46 @@ Process::id_type Process::open(const string_type &command, const string_type &pa
   process_command+="\"";
 #endif
 
-  BOOL bSuccess = CreateProcess(nullptr, process_command.empty()?nullptr:&process_command[0], nullptr, nullptr, TRUE, 0,
-                                nullptr, path.empty()?nullptr:path.c_str(), &startup_info, &process_info);
+  BOOL bSuccess = CreateProcess(
+    nullptr,
+    process_command.empty() ? nullptr : &process_command[0],
+    nullptr,
+    nullptr,
+    TRUE,
+    0,
+    nullptr,
+    path.empty() ? nullptr : path.c_str(),
+    &startup_info,
+    &process_info
+  );
 
-  if(!bSuccess) {
-    CloseHandle(process_info.hProcess);
+  if (!bSuccess) {
+    closeHandle(process_info.hProcess);
     CloseHandle(process_info.hThread);
     return 0;
-  }
-  else {
+  } else {
     CloseHandle(process_info.hThread);
   }
 
-  if(stdin_fd) *stdin_fd=stdin_wr_p.detach();
+  if(stdin_fd ) *stdin_fd=stdin_wr_p  .detach();
   if(stdout_fd) *stdout_fd=stdout_rd_p.detach();
   if(stderr_fd) *stderr_fd=stderr_rd_p.detach();
 
-  closed=false;
-  data.id=process_info.dwProcessId;
-  data.handle=process_info.hProcess;
+  closed = false;
+  data.id = process_info.dwProcessId;
+  data.handle = process_info.hProcess;
   return process_info.dwProcessId;
 }
 
 void Process::async_read() {
   if(data.id==0)
     return;
+
   if(stdout_fd) {
     stdout_thread=std::thread([this](){
                                 DWORD n;
                                 std::unique_ptr<char[]> buffer(new char[buffer_size]);
-                                for (;;) {
+                                while (true) {
                                   BOOL bSuccess = ReadFile(*stdout_fd, static_cast<CHAR*>(buffer.get()), static_cast<DWORD>(buffer_size), &n, nullptr);
                                   if(!bSuccess || n == 0)
                                     break;
@@ -266,11 +297,12 @@ void Process::async_read() {
                                 }
                               });
   }
+
   if(stderr_fd) {
     stderr_thread=std::thread([this](){
                                 DWORD n;
                                 std::unique_ptr<char[]> buffer(new char[buffer_size]);
-                                for (;;) {
+                                while (true) {
                                   BOOL bSuccess = ReadFile(*stderr_fd, static_cast<CHAR*>(buffer.get()), static_cast<DWORD>(buffer_size), &n, nullptr);
                                   if(!bSuccess || n == 0)
                                     break;
@@ -283,6 +315,7 @@ void Process::async_read() {
 int Process::get_exit_status() {
   if(data.id==0)
     return -1;
+
   DWORD exit_status;
   WaitForSingleObject(data.handle, INFINITE);
   if(!GetExitCodeProcess(data.handle, &exit_status))
@@ -306,11 +339,11 @@ void Process::close_fds() {
   if(stdin_fd)
     close_stdin();
   if(stdout_fd) {
-    if(*stdout_fd!=NULL) CloseHandle(*stdout_fd);
+    if(*stdout_fd != NULL) CloseHandle(*stdout_fd);
     stdout_fd.reset();
   }
   if(stderr_fd) {
-    if(*stderr_fd!=NULL) CloseHandle(*stderr_fd);
+    if(*stderr_fd != NULL) CloseHandle(*stderr_fd);
     stderr_fd.reset();
   }
 }
@@ -322,7 +355,7 @@ bool Process::write(const char *bytes, size_t n) {
   std::lock_guard<std::mutex> lock(stdin_mutex);
   if(stdin_fd) {
     DWORD written;
-    BOOL bSuccess=WriteFile(*stdin_fd, bytes, static_cast<DWORD>(n), &written, nullptr);
+    BOOL bSuccess = WriteFile(*stdin_fd, bytes, static_cast<DWORD>(n), &written, nullptr);
     if(!bSuccess || written==0) {
       return false;
     }
@@ -367,34 +400,10 @@ void Process::kill(bool force) {
   }
 }
 
-//Based on http://stackoverflow.com/a/1173396
-void Process::kill(id_type id, bool force) {
-  if(id==0)
-    return;
-  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if(snapshot) {
-    PROCESSENTRY32 process;
-    ZeroMemory(&process, sizeof(process));
-    process.dwSize = sizeof(process);
-    if(Process32First(snapshot, &process)) {
-      do {
-        if(process.th32ParentProcessID==id) {
-          HANDLE process_handle = OpenProcess(PROCESS_TERMINATE, FALSE, process.th32ProcessID);
-          if(process_handle) {
-            TerminateProcess(process_handle, 2);
-            CloseHandle(process_handle);
-          }
-        }
-      } while (Process32Next(snapshot, &process));
-    }
-    CloseHandle(snapshot);
-  }
-  HANDLE process_handle = OpenProcess(PROCESS_TERMINATE, FALSE, id);
-  if(process_handle) TerminateProcess(process_handle, 2);
-}
 // ----------------
 // process_win.cpp
 // ----------------
+*/
 
 #else
 
@@ -404,120 +413,127 @@ void Process::kill(id_type id, bool force) {
 
 Process::Data::Data() : id(-1) {}
 
-Process::Process(std::function<void()> func,
-                 std::function<void (const char *, size_t)> read_stdout,
-                 std::function<void (const char *, size_t)> read_stderr,
-                 bool open_stdin, size_t buffer_size) :
-    closed(true), read_stdout(read_stdout), read_stderr(read_stderr), open_stdin(open_stdin), buffer_size(buffer_size), async(true), blocking(true) {
-      open(func);
-    }
+Process::id_type Process::open(std::function<void()> func) {
+  if (!closed)
+    return -1;
 
-Process::id_type Process::open(std::function<void()> function) {
-  if(open_stdin)  stdin_fd=std::unique_ptr<fd_type>(new fd_type);
-  if(read_stdout) stdout_fd=std::unique_ptr<fd_type>(new fd_type);
-  if(read_stderr) stderr_fd=std::unique_ptr<fd_type>(new fd_type);
+  if(flags & OPEN_STDIN ) stdin_fd  = std::unique_ptr<fd_type>(new fd_type);
+  if(flags & OPEN_STDOUT) stdout_fd = std::unique_ptr<fd_type>(new fd_type);
+  if(flags & OPEN_STDERR) stderr_fd = std::unique_ptr<fd_type>(new fd_type);
 
   int stdin_p[2], stdout_p[2], stderr_p[2];
 
-  if(stdin_fd && pipe(stdin_p)!=0)
+  auto close_pipes = [](int pipes[]) { close(pipes[0]); close(pipes[1]); };
+
+  if(stdin_fd && pipe(stdin_p) != 0)
     return -1;
-  if(stdout_fd && pipe(stdout_p)!=0) {
-    if(stdin_fd) {close(stdin_p[0]);close(stdin_p[1]);}
+
+  if(stdout_fd && pipe(stdout_p) != 0) {
+    if(stdin_fd) close_pipes(stdin_p);
     return -1;
   }
+
   if(stderr_fd && pipe(stderr_p)!=0) {
-    if(stdin_fd) {close(stdin_p[0]);close(stdin_p[1]);}
-    if(stdout_fd) {close(stdout_p[0]);close(stdout_p[1]);}
+    if(stdin_fd ) close_pipes(stdin_p );
+    if(stdout_fd) close_pipes(stdout_p);
     return -1;
   }
 
   id_type pid = fork();
 
   if (pid < 0) {
-    if(stdin_fd) {close(stdin_p[0]);close(stdin_p[1]);}
-    if(stdout_fd) {close(stdout_p[0]);close(stdout_p[1]);}
-    if(stderr_fd) {close(stderr_p[0]);close(stderr_p[1]);}
+    if(stdin_fd ) close_pipes(stdin_p );
+    if(stdout_fd) close_pipes(stdout_p);
+    if(stderr_fd) close_pipes(stderr_p);
     return pid;
-  }
-  else if (pid == 0) {
-    if(stdin_fd) dup2(stdin_p[0], 0);
+  } else if (pid == 0) {
+    if(stdin_fd ) dup2(stdin_p [0], 0);
     if(stdout_fd) dup2(stdout_p[1], 1);
     if(stderr_fd) dup2(stderr_p[1], 2);
-    if(stdin_fd) {close(stdin_p[0]);close(stdin_p[1]);}
-    if(stdout_fd) {close(stdout_p[0]);close(stdout_p[1]);}
-    if(stderr_fd) {close(stderr_p[0]);close(stderr_p[1]);}
+
+    if(stdin_fd ) close_pipes(stdin_p );
+    if(stdout_fd) close_pipes(stdout_p);
+    if(stderr_fd) close_pipes(stderr_p);
 
     //Based on http://stackoverflow.com/a/899533/3808293
-    int fd_max=sysconf(_SC_OPEN_MAX);
-    for(int fd=3;fd<fd_max;fd++)
+    int fd_max = sysconf(_SC_OPEN_MAX);
+    for(int fd = 3; fd < fd_max; fd++)
       close(fd);
 
     setpgid(0, 0);
     //TODO: See here on how to emulate tty for colors: http://stackoverflow.com/questions/1401002/trick-an-application-into-thinking-its-stdin-is-interactive-not-a-pipe
     //TODO: One solution is: echo "command;exit"|script -q /dev/null
 
-    if(function)
-      function();
+    if(func)
+      func();
 
     _exit(EXIT_FAILURE);
   }
 
-  if(stdin_fd) close(stdin_p[0]);
+  if(stdin_fd ) close(stdin_p [0]);
   if(stdout_fd) close(stdout_p[1]);
   if(stderr_fd) close(stderr_p[1]);
 
-  if(stdin_fd) *stdin_fd = stdin_p[1];
+  if(stdin_fd ) *stdin_fd  = stdin_p [1];
   if(stdout_fd) *stdout_fd = stdout_p[0];
   if(stderr_fd) *stderr_fd = stderr_p[0];
 
-  closed=false;
-  data.id=pid;
+  closed = false;
+  data.id = pid;
+
   return pid;
 }
 
-Process::id_type Process::open(const std::string &command, const std::string &path) {
-  return open([&command, &path] {
-              if(!path.empty()) {
-              auto path_escaped=path;
-              size_t pos=0;
-              //Based on https://www.reddit.com/r/cpp/comments/3vpjqg/a_new_platform_independent_process_library_for_c11/cxsxyb7
-              while((pos=path_escaped.find('\'', pos))!=std::string::npos) {
-              path_escaped.replace(pos, 1, "'\\''");
-              pos+=4;
-              }
-              execl("/bin/sh", "sh", "-c", ("cd '"+path_escaped+"' && "+command).c_str(), NULL);
-              }
-              else
-              execl("/bin/sh", "sh", "-c", command.c_str(), NULL);
-              });
+Process::id_type Process::open(const std::string& command) {
+  return open([&command] { execl("/bin/sh", "sh", "-c", command.c_str(), nullptr); });
 }
 
-void Process::async_read() {
-  if(data.id<=0)
+bool Process::read_line(std::string& str) {
+  if (data.id <= 0 or closed or !stdout_fd)
+    return false;
+
+  str.clear();
+
+  char buffer;
+  while ((read(*stdout_fd, &buffer, sizeof(buffer))) > 0 and buffer != '\n')
+    str += buffer;
+
+  return true;
+}
+
+void Process::read_stdout(std::function<void(const char*, size_t)> callback) {
+  if(data.id <= 0 or closed or !stdout_fd) // FIXME: Also verify if is already reading
     return;
-  if(stdout_fd) {
-    stdout_thread=std::thread([this](){
+
+  stdout_thread = std::thread([this, &callback] {
                                 auto buffer = std::unique_ptr<char[]>( new char[buffer_size] );
                                 ssize_t n;
-                                while ((n=read(*stdout_fd, buffer.get(), buffer_size)) > 0)
-                                  read_stdout(buffer.get(), static_cast<size_t>(n));
-                              });
-  }
-  if(stderr_fd) {
-    stderr_thread=std::thread([this](){
+                                while ((n = read(*stdout_fd, buffer.get(), buffer_size)) > 0)
+                                  callback(buffer.get(), static_cast<size_t>(n));
+                              }
+                             );
+}
+
+void Process::read_stderr(std::function<void(const char*, size_t)> callback) {
+  if(data.id <= 0 or closed or !stderr_fd) // FIXME: Also verify if is already reading
+    return;
+
+  stderr_thread = std::thread([this, &callback] {
                                 auto buffer = std::unique_ptr<char[]>( new char[buffer_size] );
                                 ssize_t n;
-                                while ((n=read(*stderr_fd, buffer.get(), buffer_size)) > 0)
-                                  read_stderr(buffer.get(), static_cast<size_t>(n));
-                              });
-  }
+                                while ((n = read(*stderr_fd, buffer.get(), buffer_size)) > 0)
+                                  callback(buffer.get(), static_cast<size_t>(n));
+                              }
+                             );
 }
 
 int Process::get_exit_status() {
-  if(data.id<=0)
+  if (data.id <= 0 or closed)
     return -1;
+
   int exit_status;
   waitpid(data.id, &exit_status, 0);
+
   {
     std::lock_guard<std::mutex> lock(close_mutex);
     closed=true;
@@ -526,71 +542,58 @@ int Process::get_exit_status() {
 
   if(exit_status>=256)
     exit_status=exit_status>>8;
+
   return exit_status;
 }
 
 void Process::close_fds() {
-  if(stdout_thread.joinable())
+  if (stdout_thread.joinable())
     stdout_thread.join();
-  if(stderr_thread.joinable())
+  if (stderr_thread.joinable())
     stderr_thread.join();
 
-  if(stdin_fd)
+  if (stdin_fd)
     close_stdin();
-  if(stdout_fd) {
-    if(data.id>0)
+
+  if (stdout_fd) {
+    if (data.id > 0)
       close(*stdout_fd);
     stdout_fd.reset();
   }
-  if(stderr_fd) {
-    if(data.id>0)
+
+  if (stderr_fd) {
+    if (data.id > 0)
       close(*stderr_fd);
     stderr_fd.reset();
   }
 }
 
 bool Process::write(const char *bytes, size_t n) {
-  if(!open_stdin)
-    throw std::invalid_argument("Can't write to an unopened stdin pipe. Please set open_stdin=true when constructing the process.");
+  if (closed or !stdin_fd)
+    return false;
 
-  std::lock_guard<std::mutex> lock(stdin_mutex);
-  if(stdin_fd) {
-    if(::write(*stdin_fd, bytes, n)>=0) {
-      return true;
-    }
-    else {
-      return false;
-    }
-  }
+  if (stdin_fd and ::write(*stdin_fd, bytes, n) >= 0)
+    return true;
+
   return false;
 }
 
 void Process::close_stdin() {
-  std::lock_guard<std::mutex> lock(stdin_mutex);
-  if(stdin_fd) {
-    if(data.id>0)
-      close(*stdin_fd);
-    stdin_fd.reset();
-  }
+  if (closed or !stdin_fd or data.id <= 0)
+    return;
+
+  close(*stdin_fd);
+  stdin_fd.reset();
 }
 
 void Process::kill(bool force) {
-  std::lock_guard<std::mutex> lock(close_mutex);
-  if(data.id>0 && !closed) {
-    if(force)
-      ::kill(-data.id, SIGTERM);
-    else
-      ::kill(-data.id, SIGINT);
-  }
-}
-
-void Process::kill(id_type id, bool force) {
-  if(id<=0)
+  if (closed or data.id <= 0)
     return;
-  if(force)
-    ::kill(-id, SIGTERM);
+
+  if (force)
+    ::kill(-data.id, SIGTERM);
   else
-    ::kill(-id, SIGINT);
+    ::kill(-data.id, SIGINT);
 }
 
 // ----------------
