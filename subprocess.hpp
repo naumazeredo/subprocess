@@ -477,7 +477,7 @@ void Process::close_stdin() {
 
 //Based on http://stackoverflow.com/a/1173396
 void Process::kill(bool force) {
-  if (!closed or data.id <= 0)
+  if (closed or data.id <= 0)
     return;
 
   /*
